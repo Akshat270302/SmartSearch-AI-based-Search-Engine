@@ -4,9 +4,10 @@ import json
 import time
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 from gemini_service import (
     build_evidence_sources,
@@ -351,6 +352,19 @@ async def ask_stream(
         time_range, category, engine
     )
     results = await fetch_search_results(q, search_params)
+    return create_answer_stream(request, q, results, filter_metadata)
+
+
+class AnswerContextRequest(BaseModel):
+    results: list[dict] = []
+
+
+def create_answer_stream(
+    request: Request,
+    query: str,
+    results: list[dict],
+    filter_metadata: dict | None = None,
+):
     sources = build_evidence_sources(results)
 
     async def event_stream():
@@ -360,10 +374,10 @@ async def ask_stream(
         try:
             yield sse_event(
                 "start",
-                query=q,
+                query=query,
                 total_results=len(results),
                 evidence_count=len(sources),
-                filters=filter_metadata,
+                filters=filter_metadata or {},
             )
 
             if not sources:
@@ -377,7 +391,7 @@ async def ask_stream(
                 )
                 return
 
-            iterator = stream_grounded_answer(q, results)
+            iterator = stream_grounded_answer(query, results)
             while True:
                 if await request.is_disconnected():
                     return
@@ -417,3 +431,16 @@ async def ask_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/ask/stream/context")
+async def ask_stream_with_context(
+    request: Request,
+    q: str = Query(
+        ...,
+        min_length=1,
+        description="The question to answer using supplied search results",
+    ),
+    context: AnswerContextRequest = Body(...),
+):
+    return create_answer_stream(request, q, context.results)

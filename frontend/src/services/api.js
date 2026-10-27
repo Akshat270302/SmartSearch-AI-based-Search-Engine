@@ -94,14 +94,26 @@ export async function searchQuestion(query, { signal, category } = {}) {
   return payload;
 }
 
-export async function streamQuestion(query, { signal, onEvent } = {}) {
+export async function streamQuestion(query, { signal, onEvent, results } = {}) {
+  const hasContext = Array.isArray(results);
   const params = new URLSearchParams({ q: query });
+  const request = hasContext
+    ? fetch(`${API_BASE_URL}/ask/stream/context?${params}`, {
+        method: "POST",
+        signal,
+        headers: {
+          Accept: "text/event-stream",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ results }),
+      })
+    : fetch(`${API_BASE_URL}/ask/stream?${params}`, {
+        signal,
+        headers: { Accept: "text/event-stream" },
+      });
   let response;
   try {
-    response = await fetch(`${API_BASE_URL}/ask/stream?${params}`, {
-      signal,
-      headers: { Accept: "text/event-stream" },
-    });
+    response = await request;
   } catch (error) {
     if (error.name === "AbortError") throw error;
     throw new Error(

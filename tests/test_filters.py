@@ -67,6 +67,19 @@ class SearchFilterTests(unittest.IsolatedAsyncioTestCase):
                     await main.resolve_filters(*filters)
                 self.assertEqual(context.exception.status_code, 422)
 
+    async def test_answer_context_accepts_cached_search_results(self):
+        results = [
+            {
+                "title": "FastAPI",
+                "url": "https://fastapi.tiangolo.com/",
+                "snippet": "A web framework for building APIs.",
+            }
+        ]
+
+        context = main.AnswerContextRequest(results=results)
+
+        self.assertEqual(context.results, results)
+
 
 if __name__ == "__main__":
     unittest.main()

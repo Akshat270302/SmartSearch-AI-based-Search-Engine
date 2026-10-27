@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import AIAnswer from "./components/AIAnswer";
+import ConversationView from "./components/ConversationView";
 import ErrorState from "./components/ErrorState";
 import Header from "./components/Header";
 import ImageResults from "./components/ImageResults";
@@ -11,6 +12,7 @@ import SearchResults from "./components/SearchResults";
 import { searchQuestion, streamQuestion } from "./services/api";
 
 const PRODUCT_NAME = "SearchAI";
+const MAX_CONVERSATION_MESSAGE_LENGTH = 4000;
 const EXAMPLE_QUERIES = [
   "What is machine learning?",
   "Latest developments in space exploration",
@@ -19,6 +21,7 @@ const EXAMPLE_QUERIES = [
 
 function createSession(query) {
   return {
+    id: createId(),
     query,
     web: { results: null, totalResults: 0, status: "idle", error: "" },
     images: { results: null, totalResults: 0, status: "idle", error: "" },
@@ -32,6 +35,29 @@ function createSession(query) {
   };
 }
 
+function createId() {
+  return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function createConversation(sessionId) {
+  return {
+    id: createId(),
+    sessionId,
+    messages: [],
+  };
+}
+
+function createMessage(role, content, extra = {}) {
+  return {
+    id: createId(),
+    role,
+    content,
+    citations: [],
+    status: "complete",
+    ...extra,
+  };
+}
+
 function getRequestError(error) {
   return error instanceof Error && error.message
     ? error.message
@@ -41,9 +67,11 @@ function getRequestError(error) {
 function App() {
   const [query, setQuery] = useState("");
   const [session, setSession] = useState(null);
+  const [conversation, setConversation] = useState(null);
   const [mode, setMode] = useState("all");
   const sessionRef = useRef(null);
-  const requestsRef = useRef({ web: null, images: null, ai: null });
+  const conversationRef = useRef(null);
+  const requestsRef = useRef({ web: null, images: null, ai: null, conversation: null });
   const answerRef = useRef(null);
 
   function commitSession(nextSession) {
@@ -51,11 +79,26 @@ function App() {
     setSession(nextSession);
   }
 
-  function updateSession(queryKey, update) {
+  function commitConversation(nextConversation) {
+    conversationRef.current = nextConversation;
+    setConversation(nextConversation);
+  }
+
+  function updateSession(queryKey, sessionId, update) {
     const current = sessionRef.current;
-    if (!current || current.query !== queryKey) return;
+    if (!current || current.query !== queryKey || current.id !== sessionId) return;
     const nextSession = update(current);
     commitSession(nextSession);
+  }
+
+  function updateConversation(sessionId, conversationId, update) {
+    const current = conversationRef.current;
+    if (
+      !current ||
+      current.sessionId !== sessionId ||
+      current.id !== conversationId
+    ) return;
+    commitConversation(update(current));
   }
 
   function cancelRequest(type) {
@@ -64,7 +107,7 @@ function App() {
   }
 
   function cancelAllRequests() {
-    ["web", "images", "ai"].forEach(cancelRequest);
+    ["web", "images", "ai", "conversation"].forEach(cancelRequest);
   }
 
   useEffect(() => {
@@ -77,21 +120,43 @@ function App() {
     }
   }, [session?.ai.status, session?.web.status]);
 
+  useEffect(() => {
+    if (!session || session.ai.status !== "complete") return;
+    const current = conversationRef.current;
+    if (
+      !current ||
+      current.sessionId !== session.id ||
+      current.messages.length > 0
+    ) return;
+
+    commitConversation({
+      ...current,
+      messages: [
+        createMessage("user", session.query),
+        createMessage("assistant", session.ai.summary, {
+          citations: session.ai.citations,
+          sourceCount: session.web.results?.length,
+        }),
+      ],
+    });
+  }, [session]);
+
   async function loadWebResults(queryKey) {
     const current = sessionRef.current;
     if (!current || current.query !== queryKey) return;
+    const sessionId = current.id;
     if (current.web.status === "complete") return current.web.results;
     if (requestsRef.current.web) return requestsRef.current.web.promise;
 
     const controller = new AbortController();
-    updateSession(queryKey, (value) => ({
+    updateSession(queryKey, sessionId, (value) => ({
       ...value,
       web: { ...value.web, status: "loading", error: "" },
     }));
 
     const promise = searchQuestion(queryKey, { signal: controller.signal })
       .then((payload) => {
-        updateSession(queryKey, (value) => ({
+        updateSession(queryKey, sessionId, (value) => ({
           ...value,
           web: {
             results: payload.results,
@@ -104,7 +169,7 @@ function App() {
       })
       .catch((error) => {
         if (error.name !== "AbortError") {
-          updateSession(queryKey, (value) => ({
+          updateSession(queryKey, sessionId, (value) => ({
             ...value,
             web: { ...value.web, status: "error", error: getRequestError(error) },
           }));
@@ -124,11 +189,12 @@ function App() {
   async function loadImageResults(queryKey) {
     const current = sessionRef.current;
     if (!current || current.query !== queryKey) return;
+    const sessionId = current.id;
     if (current.images.status === "complete") return current.images.results;
     if (requestsRef.current.images) return requestsRef.current.images.promise;
 
     const controller = new AbortController();
-    updateSession(queryKey, (value) => ({
+    updateSession(queryKey, sessionId, (value) => ({
       ...value,
       images: { ...value.images, status: "loading", error: "" },
     }));
@@ -138,7 +204,7 @@ function App() {
       category: "images",
     })
       .then((payload) => {
-        updateSession(queryKey, (value) => ({
+        updateSession(queryKey, sessionId, (value) => ({
           ...value,
           images: {
             results: payload.results,
@@ -151,7 +217,7 @@ function App() {
       })
       .catch((error) => {
         if (error.name !== "AbortError") {
-          updateSession(queryKey, (value) => ({
+          updateSession(queryKey, sessionId, (value) => ({
             ...value,
             images: {
               ...value.images,
@@ -175,6 +241,7 @@ function App() {
   async function loadAIAnswer(queryKey) {
     const current = sessionRef.current;
     if (!current || current.query !== queryKey) return;
+    const sessionId = current.id;
     if (current.ai.status === "complete") return;
     if (requestsRef.current.ai) return requestsRef.current.ai.promise;
 
@@ -183,7 +250,7 @@ function App() {
       webResults = await loadWebResults(queryKey);
     } catch (error) {
       if (error.name !== "AbortError") {
-        updateSession(queryKey, (value) => ({
+        updateSession(queryKey, sessionId, (value) => ({
           ...value,
           ai: { ...value.ai, status: "error", error: value.web.error },
         }));
@@ -191,9 +258,13 @@ function App() {
       return;
     }
 
-    if (!sessionRef.current || sessionRef.current.query !== queryKey) return;
+    if (
+      !sessionRef.current ||
+      sessionRef.current.query !== queryKey ||
+      sessionRef.current.id !== sessionId
+    ) return;
     const controller = new AbortController();
-    updateSession(queryKey, (value) => ({
+    updateSession(queryKey, sessionId, (value) => ({
       ...value,
       ai: { ...value.ai, status: "loading", error: "", streamingAnswer: "" },
     }));
@@ -204,7 +275,7 @@ function App() {
       results: webResults,
       onEvent: (event) => {
         if (event.type === "chunk" && typeof event.text === "string") {
-          updateSession(queryKey, (value) => ({
+          updateSession(queryKey, sessionId, (value) => ({
             ...value,
             ai: {
               ...value.ai,
@@ -219,7 +290,23 @@ function App() {
             throw new Error("The search service returned an incomplete stream.");
           }
           completed = true;
-          updateSession(queryKey, (value) => ({
+          const currentConversation = conversationRef.current;
+          if (
+            currentConversation?.sessionId === sessionId &&
+            currentConversation.messages.length === 0
+          ) {
+            commitConversation({
+              ...currentConversation,
+              messages: [
+                createMessage("user", queryKey),
+                createMessage("assistant", event.answer, {
+                  citations: event.citations,
+                  sourceCount: sessionRef.current?.web.results?.length,
+                }),
+              ],
+            });
+          }
+          updateSession(queryKey, sessionId, (value) => ({
             ...value,
             ai: {
               summary: event.answer,
@@ -241,7 +328,7 @@ function App() {
       })
       .catch((error) => {
         if (error.name !== "AbortError") {
-          updateSession(queryKey, (value) => ({
+          updateSession(queryKey, sessionId, (value) => ({
             ...value,
             ai: {
               ...value.ai,
@@ -262,10 +349,170 @@ function App() {
     return promise;
   }
 
+  function isCurrentConversationRequest(request) {
+    return (
+      requestsRef.current.conversation === request &&
+      !request.controller.signal.aborted &&
+      sessionRef.current?.id === request.sessionId &&
+      conversationRef.current?.id === request.conversationId
+    );
+  }
+
+  function generateConversationAnswer(userMessageId, assistantMessageId) {
+    const activeSession = sessionRef.current;
+    const activeConversation = conversationRef.current;
+    if (!activeSession || !activeConversation) return;
+    if (requestsRef.current.conversation) return;
+
+    const userIndex = activeConversation.messages.findIndex(
+      (message) => message.id === userMessageId,
+    );
+    if (userIndex < 0) return;
+    const userMessage = activeConversation.messages[userIndex];
+    const history = activeConversation.messages
+      .slice(0, userIndex)
+      .filter((message) => message.status === "complete" && message.content.trim())
+      .map(({ role, content }) => ({
+        role,
+        content: content.slice(0, MAX_CONVERSATION_MESSAGE_LENGTH),
+      }));
+    const request = {
+      controller: new AbortController(),
+      sessionId: activeSession.id,
+      conversationId: activeConversation.id,
+      userMessageId,
+      assistantMessageId,
+    };
+
+    updateConversation(request.sessionId, request.conversationId, (value) => ({
+      ...value,
+      messages: value.messages.map((message) =>
+        message.id === assistantMessageId
+          ? { ...message, content: "", citations: [], error: "", status: "streaming" }
+          : message,
+      ),
+    }));
+    requestsRef.current.conversation = request;
+
+    request.promise = Promise.resolve()
+      .then(async () => {
+        const results = await loadWebResults(activeSession.query);
+        if (!isCurrentConversationRequest(request)) return;
+
+        let completed = false;
+        let streamError = null;
+        await streamQuestion(userMessage.content, {
+          signal: request.controller.signal,
+          results,
+          conversationHistory: history,
+          onEvent: (event) => {
+            if (!isCurrentConversationRequest(request)) return;
+            if (event.type === "chunk" && typeof event.text === "string") {
+              updateConversation(request.sessionId, request.conversationId, (value) => ({
+                ...value,
+                messages: value.messages.map((message) =>
+                  message.id === assistantMessageId
+                    ? { ...message, content: message.content + event.text }
+                    : message,
+                ),
+              }));
+            } else if (event.type === "complete") {
+              if (typeof event.answer !== "string" || !Array.isArray(event.citations)) {
+                streamError = new Error("The search service returned an incomplete stream.");
+                return;
+              }
+              completed = true;
+              updateConversation(request.sessionId, request.conversationId, (value) => ({
+                ...value,
+                messages: value.messages.map((message) =>
+                  message.id === assistantMessageId
+                    ? {
+                        ...message,
+                        content: event.answer,
+                        citations: event.citations,
+                        sourceCount: results.length,
+                        error: "",
+                        status: "complete",
+                      }
+                    : message,
+                ),
+              }));
+            } else if (event.type === "error") {
+              streamError = new Error(event.message || "The answer stream failed.");
+            }
+          },
+        });
+
+        if (streamError) throw streamError;
+        if (!completed && !request.controller.signal.aborted) {
+          throw new Error("The answer stream ended before completion.");
+        }
+      })
+      .catch((error) => {
+        if (error.name === "AbortError" || request.controller.signal.aborted) return;
+        if (!isCurrentConversationRequest(request)) return;
+        updateConversation(request.sessionId, request.conversationId, (value) => ({
+          ...value,
+          messages: value.messages.map((message) =>
+            message.id === assistantMessageId
+              ? { ...message, content: "", citations: [], error: getRequestError(error), status: "error" }
+              : message,
+          ),
+        }));
+      })
+      .finally(() => {
+        if (requestsRef.current.conversation === request) {
+          requestsRef.current.conversation = null;
+        }
+      });
+
+    return request.promise;
+  }
+
+  function handleConversationSend(content) {
+    if (requestsRef.current.conversation) return;
+    const current = conversationRef.current;
+    const activeSession = sessionRef.current;
+    if (!current || !activeSession || current.sessionId !== activeSession.id) return;
+    if (activeSession.ai.status === "loading") return;
+
+    const userMessage = createMessage("user", content);
+    const assistantMessage = createMessage("assistant", "", {
+      relatedUserId: userMessage.id,
+      status: "streaming",
+    });
+    commitConversation({
+      ...current,
+      messages: [...current.messages, userMessage, assistantMessage],
+    });
+    generateConversationAnswer(userMessage.id, assistantMessage.id);
+  }
+
+  function handleRetryConversation(userMessageId, assistantMessageId) {
+    if (requestsRef.current.conversation) return;
+    generateConversationAnswer(userMessageId, assistantMessageId);
+  }
+
+  function handleCancelConversation() {
+    const request = requestsRef.current.conversation;
+    if (!request) return;
+    requestsRef.current.conversation = null;
+    request.controller.abort();
+    updateConversation(request.sessionId, request.conversationId, (value) => ({
+      ...value,
+      messages: value.messages.map((message) =>
+        message.id === request.assistantMessageId
+          ? { ...message, content: "", citations: [], error: "", status: "cancelled" }
+          : message,
+      ),
+    }));
+  }
+
   function startNewSearch(queryKey) {
     cancelAllRequests();
     const nextSession = createSession(queryKey);
     commitSession(nextSession);
+    commitConversation(createConversation(nextSession.id));
     setMode("all");
     loadWebResults(queryKey).catch(() => {});
     loadImageResults(queryKey).catch(() => {});
@@ -301,6 +548,8 @@ function App() {
   }
 
   function handleCancel() {
+    const current = sessionRef.current;
+    if (!current) return;
     const type =
       mode === "images"
         ? "images"
@@ -308,11 +557,14 @@ function App() {
           ? "ai"
           : "web";
     cancelRequest(type);
-    updateSession(sessionRef.current?.query, (value) => ({
+    updateSession(current.query, current.id, (value) => ({
       ...value,
       [type]: {
         ...value[type],
-        status: "idle",
+        status: type === "ai" ? "error" : "idle",
+        ...(type === "ai"
+          ? { error: "Answer generation was cancelled. Retry to continue." }
+          : {}),
         ...(type === "ai" ? { streamingAnswer: "" } : {}),
       },
     }));
@@ -333,6 +585,17 @@ function App() {
     mode === "all" && session?.web.status !== "error"
       ? session?.ai
       : activeBranch;
+  const activeConversation =
+    conversation?.sessionId === session?.id ? conversation : null;
+  const isConversationGenerating =
+    session?.ai.status === "loading" ||
+    Boolean(requestsRef.current.conversation) ||
+    Boolean(activeConversation?.messages.some(
+      (message) => message.role === "assistant" && message.status === "streaming",
+    ));
+  const showInitialStreamingAnswer =
+    mode === "all" ||
+    (mode === "ai" && activeConversation?.messages.length === 0);
 
   return (
     <main className="min-h-screen overflow-x-hidden bg-slate-950 text-slate-100">
@@ -371,7 +634,10 @@ function App() {
         </div>
 
         {isActiveLoading && (
-          <LoadingState message={loadingMessage} onCancel={handleCancel} />
+          <LoadingState
+            message={loadingMessage}
+            onCancel={mode === "ai" ? undefined : handleCancel}
+          />
         )}
         {mode !== "images" && session?.images.status === "loading" && (
           <LoadingState message="Preparing image results in the background..." />
@@ -379,7 +645,7 @@ function App() {
         {mode !== "all" && session?.web.status === "loading" && (
           <LoadingState message="Preparing web results in the background..." />
         )}
-        {(mode === "ai" || mode === "all") && session?.ai.streamingAnswer && (
+        {showInitialStreamingAnswer && session?.ai.streamingAnswer && (
           <div className="mt-10 w-full max-w-2xl text-left" aria-live="polite">
             <AIAnswer
               summary={session.ai.streamingAnswer}
@@ -414,12 +680,16 @@ function App() {
             />
           </div>
         )}
-        {session && mode === "ai" && session.ai.status === "complete" && (
-          <div className="mt-10 w-full max-w-2xl scroll-mt-6" ref={answerRef}>
-            <AIAnswer
-              summary={session.ai.summary}
-              sourceCount={session.web.results?.length}
-              citations={session.ai.citations}
+        {session && mode === "ai" && activeConversation && (
+          <div className="w-full scroll-mt-6" ref={answerRef}>
+            <ConversationView
+              key={activeConversation.id}
+              messages={activeConversation.messages}
+              isGenerating={isConversationGenerating}
+              isInitialLoading={session.ai.status === "loading" && activeConversation.messages.length === 0}
+              onSend={handleConversationSend}
+              onCancel={requestsRef.current.conversation ? handleCancelConversation : handleCancel}
+              onRetry={handleRetryConversation}
             />
           </div>
         )}

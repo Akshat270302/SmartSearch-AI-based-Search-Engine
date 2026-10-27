@@ -2,17 +2,19 @@ import os
 import asyncio
 import json
 import time
+from typing import Literal
 
 import httpx
 from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from gemini_service import (
     build_evidence_sources,
     generate_grounded_answer,
     get_validated_citations,
+    resolve_followup_question,
     stream_grounded_answer,
 )
 
@@ -355,8 +357,14 @@ async def ask_stream(
     return create_answer_stream(request, q, results, filter_metadata)
 
 
+class ConversationMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
 class AnswerContextRequest(BaseModel):
-    results: list[dict] = []
+    results: list[dict] = Field(default_factory=list)
+    conversation_history: list[ConversationMessage] = Field(default_factory=list)
 
 
 def create_answer_stream(
@@ -364,6 +372,8 @@ def create_answer_stream(
     query: str,
     results: list[dict],
     filter_metadata: dict | None = None,
+    conversation_history: list[ConversationMessage] | None = None,
+    interpreted_question: str | None = None,
 ):
     sources = build_evidence_sources(results)
 
@@ -391,7 +401,14 @@ def create_answer_stream(
                 )
                 return
 
-            iterator = stream_grounded_answer(query, results)
+            iterator = stream_grounded_answer(
+                query,
+                results,
+                conversation_history=[
+                    message.model_dump() for message in (conversation_history or [])
+                ],
+                interpreted_question=interpreted_question,
+            )
             while True:
                 if await request.is_disconnected():
                     return
@@ -443,4 +460,45 @@ async def ask_stream_with_context(
     ),
     context: AnswerContextRequest = Body(...),
 ):
-    return create_answer_stream(request, q, context.results)
+    results = context.results
+    conversation_history = [
+        message.model_dump() for message in context.conversation_history
+    ]
+    interpreted_question = q
+
+    if conversation_history:
+        try:
+            resolution = await asyncio.to_thread(
+                resolve_followup_question,
+                q,
+                results,
+                conversation_history,
+            )
+            interpreted_question = resolution["resolved_question"]
+        except Exception as exc:
+            # If reference resolution fails, search the original question and
+            # keep the streaming answer path available.
+            print(f"Follow-up question resolution failed: {type(exc).__name__}")
+            resolution = {"resolved_question": q, "needs_search": True}
+
+        if resolution["needs_search"] and not await request.is_disconnected():
+            # Search only when the supplied cached evidence cannot answer the
+            # clarified follow-up. These results define this answer's source
+            # IDs and citation metadata.
+            try:
+                results = await fetch_search_results(interpreted_question)
+            except Exception as exc:
+                # If refresh fails, retain the cached evidence and its valid
+                # citations; the answer prompt still gets the resolved question.
+                print(f"Follow-up search failed: {type(exc).__name__}")
+
+        if await request.is_disconnected():
+            return
+
+    return create_answer_stream(
+        request,
+        q,
+        results,
+        conversation_history=context.conversation_history,
+        interpreted_question=interpreted_question,
+    )

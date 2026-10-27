@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { ExternalLink, Sparkles } from "lucide-react";
 
 function getSafeUrl(value) {
@@ -197,6 +198,7 @@ function CitedSources({ sources }) {
 }
 
 function AIAnswer({ summary, sourceCount, citations = [] }) {
+  const headingId = useId();
   const hasSummary = typeof summary === "string" && summary.trim().length > 0;
   const sourceMap = new Map();
   const citationSources = [];
@@ -223,11 +225,11 @@ function AIAnswer({ summary, sourceCount, citations = [] }) {
   return (
     <section
       className="w-full rounded-2xl border border-teal-400/20 bg-slate-900 p-5 text-left shadow-[0_20px_50px_-28px_rgba(20,184,166,0.3)] sm:p-8"
-      aria-labelledby="ai-answer-heading"
+      aria-labelledby={headingId}
     >
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2
-          id="ai-answer-heading"
+          id={headingId}
           className="flex items-center gap-2 text-base font-semibold tracking-tight text-white"
         >
           <Sparkles className="text-teal-400" size={18} aria-hidden="true" />

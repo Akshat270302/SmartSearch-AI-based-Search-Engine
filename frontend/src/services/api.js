@@ -94,9 +94,20 @@ export async function searchQuestion(query, { signal, category } = {}) {
   return payload;
 }
 
-export async function streamQuestion(query, { signal, onEvent, results } = {}) {
+export async function streamQuestion(
+  query,
+  { signal, onEvent, results, conversationHistory } = {},
+) {
   const hasContext = Array.isArray(results);
   const params = new URLSearchParams({ q: query });
+  const contextBody = hasContext
+    ? {
+        results,
+        ...(Array.isArray(conversationHistory)
+          ? { conversation_history: conversationHistory }
+          : {}),
+      }
+    : null;
   const request = hasContext
     ? fetch(`${API_BASE_URL}/ask/stream/context?${params}`, {
         method: "POST",
@@ -105,7 +116,7 @@ export async function streamQuestion(query, { signal, onEvent, results } = {}) {
           Accept: "text/event-stream",
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ results }),
+        body: JSON.stringify(contextBody),
       })
     : fetch(`${API_BASE_URL}/ask/stream?${params}`, {
         signal,

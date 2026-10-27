@@ -3,10 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import AIAnswer from "./components/AIAnswer";
 import ErrorState from "./components/ErrorState";
 import Header from "./components/Header";
+import ImageResults from "./components/ImageResults";
 import LoadingState from "./components/LoadingState";
 import SearchBar from "./components/SearchBar";
+import SearchModeNav from "./components/SearchModeNav";
 import SearchResults from "./components/SearchResults";
-import { askQuestion } from "./services/api";
+import { searchQuestion, streamQuestion } from "./services/api";
 
 const PRODUCT_NAME = "SearchAI";
 
@@ -22,6 +24,8 @@ function App() {
   const [response, setResponse] = useState(null);
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [streamingAnswer, setStreamingAnswer] = useState("");
+  const [mode, setMode] = useState("ai");
   const abortControllerRef = useRef(null);
   const answerRef = useRef(null);
 
@@ -35,8 +39,8 @@ function App() {
     }
   }, [response]);
 
-  async function runSearch(searchQuery) {
-    if (!searchQuery || isLoading) {
+  async function runSearch(searchQuery, selectedMode = mode, replace = false) {
+    if (!searchQuery || (isLoading && !replace)) {
       return;
     }
 
@@ -49,10 +53,47 @@ function App() {
     setSubmittedQuery(searchQuery);
 
     try {
-      const result = await askQuestion(searchQuery, {
+      setStreamingAnswer("");
+      if (selectedMode === "images") {
+        const imageResponse = await searchQuestion(searchQuery, {
+          signal: controller.signal,
+          category: "images",
+        });
+        setResponse(imageResponse);
+        return;
+      }
+
+      let completed = false;
+      await streamQuestion(searchQuery, {
         signal: controller.signal,
+        onEvent: (event) => {
+          if (event.type === "chunk" && typeof event.text === "string") {
+            setStreamingAnswer((current) => current + event.text);
+          } else if (event.type === "complete") {
+            if (
+              typeof event.answer !== "string" ||
+              !Array.isArray(event.citations) ||
+              !Array.isArray(event.results)
+            ) {
+              throw new Error("The search service returned an incomplete stream.");
+            }
+            completed = true;
+            setResponse({
+              query: searchQuery,
+              summary: event.answer || "",
+              citations: Array.isArray(event.citations) ? event.citations : [],
+              total_results: event.total_results,
+              results: Array.isArray(event.results) ? event.results : [],
+            });
+            setStreamingAnswer("");
+          } else if (event.type === "error") {
+            throw new Error(event.message || "The answer stream failed.");
+          }
+        },
       });
-      setResponse(result);
+      if (!completed && !controller.signal.aborted) {
+        throw new Error("The answer stream ended before completion.");
+      }
     } catch (requestError) {
       if (requestError.name !== "AbortError") {
         setError(
@@ -82,7 +123,7 @@ function App() {
 
   function handleRetry() {
     if (submittedQuery) {
-      runSearch(submittedQuery);
+      runSearch(submittedQuery, mode);
     }
   }
 
@@ -97,6 +138,29 @@ function App() {
   function handleClearQuery() {
     if (!isLoading) {
       setQuery("");
+    }
+  }
+
+  function handleModeChange(nextMode) {
+    if (nextMode === mode) return;
+
+    abortControllerRef.current?.abort();
+    setStreamingAnswer("");
+    setResponse(null);
+    setError("");
+    setIsLoading(false);
+    setMode(nextMode);
+
+    const trimmedQuery = query.trim();
+    if (trimmedQuery) {
+      runSearch(trimmedQuery, nextMode, true);
+    }
+  }
+
+  function handleCancel() {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      setStreamingAnswer("");
     }
   }
 
@@ -126,6 +190,11 @@ function App() {
             disabled={isLoading}
             onClear={handleClearQuery}
           />
+          <SearchModeNav
+            activeMode={mode}
+            onChange={handleModeChange}
+            disabled={isLoading}
+          />
           <div className="mt-5 flex flex-wrap justify-center gap-2.5" aria-label="Example queries">
             {EXAMPLE_QUERIES.map((example) => (
               <button
@@ -141,7 +210,15 @@ function App() {
           </div>
         </div>
 
-        {isLoading && <LoadingState />}
+        {isLoading && <LoadingState onCancel={handleCancel} />}
+
+        {isLoading && streamingAnswer && (
+          <div className="mt-10 w-full max-w-2xl text-left" aria-live="polite">
+            <AIAnswer
+              summary={streamingAnswer}
+            />
+          </div>
+        )}
 
         {error && (
           <ErrorState
@@ -157,14 +234,26 @@ function App() {
             ref={answerRef}
             aria-live="polite"
           >
-            <AIAnswer
-              summary={response.summary}
-              sourceCount={response.results.length}
-            />
-            <SearchResults
-              results={response.results}
-              totalResults={response.total_results}
-            />
+            {mode !== "images" && (
+              <AIAnswer
+                summary={response.summary}
+                sourceCount={response.results.length}
+                citations={response.citations}
+              />
+            )}
+            {mode === "images" ? (
+              <ImageResults
+                results={response.results}
+                totalResults={response.total_results}
+              />
+            ) : (
+              mode === "all" && (
+                <SearchResults
+                  results={response.results}
+                  totalResults={response.total_results}
+                />
+              )
+            )}
           </div>
         )}
 

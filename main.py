@@ -17,6 +17,7 @@ from gemini_service import (
     resolve_followup_question,
     stream_grounded_answer,
 )
+from routers.documents import router as documents_router
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -53,6 +54,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(documents_router)
 
 
 async def get_searxng_capabilities() -> dict:

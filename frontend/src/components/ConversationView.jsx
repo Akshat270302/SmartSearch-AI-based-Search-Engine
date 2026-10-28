@@ -27,7 +27,7 @@ function ConversationView({
   }
 
   return (
-    <section className="mt-8 flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 text-left shadow-xl">
+    <section className="mx-auto mt-8 flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 text-left shadow-xl">
       <header className="flex items-center border-b border-slate-800 px-4 py-3 sm:px-5">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
           <MessageCircle size={17} className="text-teal-400" aria-hidden="true" />

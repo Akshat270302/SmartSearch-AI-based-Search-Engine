@@ -595,6 +595,13 @@ function App() {
     if (!current || !activeSession || current.sessionId !== activeSession.id) return;
     if (activeSession.ai.status === "loading") return;
 
+    if (!activeSession.query && !activeDocument) {
+      setQuery(content);
+      startNewSearch(content);
+      setMode("ai");
+      return;
+    }
+
     const userMessage = createMessage("user", content);
     const assistantMessage = createMessage("assistant", "", {
       relatedUserId: userMessage.id,
@@ -657,6 +664,15 @@ function App() {
 
   function handleModeChange(nextMode) {
     if (nextMode === mode) return;
+
+    if (nextMode === "ai" && !sessionRef.current) {
+      const nextSession = createSession("");
+      commitSession(nextSession);
+      commitConversation(createConversation(nextSession.id));
+      setMode("ai");
+      return;
+    }
+
     setMode(nextMode);
     const queryKey = sessionRef.current?.query;
     if (!queryKey) return;

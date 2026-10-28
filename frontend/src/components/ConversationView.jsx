@@ -133,7 +133,9 @@ function ConversationView({
             <p className="mt-1 max-w-sm text-xs leading-5 text-slate-500">
               {isInitialLoading
                 ? "Your initial search answer will appear here. You can ask a follow-up when it is ready."
-                : "Ask a follow-up about this search. Your search results stay available as context."}
+                : activeDocument
+                  ? "Ask a question about the attached document to get a grounded answer."
+                  : "Ask a question to start your AI conversation."}
             </p>
           </div>
         ) : (

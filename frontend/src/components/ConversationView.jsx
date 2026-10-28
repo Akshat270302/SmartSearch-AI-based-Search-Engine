@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { MessageCircle, RefreshCw, Send, StopCircle } from "lucide-react";
+import {
+  FileText,
+  FileUp,
+  LoaderCircle,
+  MessageCircle,
+  RefreshCw,
+  Send,
+  StopCircle,
+  X,
+} from "lucide-react";
 
 import AIAnswer from "./AIAnswer";
 
@@ -7,12 +16,19 @@ function ConversationView({
   messages,
   isGenerating,
   isInitialLoading = false,
+  isUploadInProgress = false,
+  activeDocument = null,
+  documentUploadStatus = "idle",
+  documentUploadError = "",
+  onUploadDocument,
+  onDetachDocument,
   onSend,
   onCancel,
   onRetry,
 }) {
   const [draft, setDraft] = useState("");
   const latestMessageRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     latestMessageRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -26,14 +42,82 @@ function ConversationView({
     onSend(content);
   }
 
+  function handleFileChange(event) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) onUploadDocument?.(file);
+  }
+
   return (
     <section className="mx-auto mt-8 flex w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-800 bg-slate-900/70 text-left shadow-xl">
-      <header className="flex items-center border-b border-slate-800 px-4 py-3 sm:px-5">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-4 py-3 sm:px-5">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-200">
           <MessageCircle size={17} className="text-teal-400" aria-hidden="true" />
           Conversation
         </div>
+        <div className="flex items-center gap-2">
+          <input
+            ref={fileInputRef}
+            className="sr-only"
+            type="file"
+            accept=".pdf,.txt,application/pdf,text/plain"
+            onChange={handleFileChange}
+            aria-label="Choose a PDF or TXT document"
+          />
+          {activeDocument && (
+            <span
+              className="hidden max-w-40 items-center gap-1.5 truncate text-xs text-slate-400 sm:inline-flex"
+              title={activeDocument.filename}
+            >
+              <FileText size={14} className="shrink-0 text-teal-400" aria-hidden="true" />
+              <span className="truncate">{activeDocument.filename}</span>
+            </span>
+          )}
+          <button
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-700 px-2.5 text-xs font-medium text-slate-300 transition-colors hover:border-teal-400/70 hover:text-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3"
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={documentUploadStatus === "uploading"}
+          >
+            {documentUploadStatus === "uploading" ? (
+              <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
+            ) : (
+              <FileUp size={14} aria-hidden="true" />
+            )}
+            <span>{documentUploadStatus === "uploading" ? "Indexing…" : activeDocument ? "Replace" : "Upload document"}</span>
+          </button>
+          {activeDocument && (
+            <button
+              className="grid h-9 w-9 place-items-center rounded-lg text-slate-500 transition-colors hover:bg-slate-800 hover:text-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400"
+              type="button"
+              onClick={onDetachDocument}
+              aria-label="Detach document from this session"
+              title="Detach document"
+            >
+              <X size={15} aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </header>
+
+      {(activeDocument || isUploadInProgress || documentUploadError) && (
+        <div className="border-b border-slate-800 px-4 py-2.5 sm:px-5" aria-live="polite">
+          {activeDocument && (
+            <p className="truncate text-xs text-slate-400 sm:hidden" title={activeDocument.filename}>
+              Attached: {activeDocument.filename}
+            </p>
+          )}
+          {isUploadInProgress && (
+            <p className="flex items-center gap-2 text-xs text-slate-400" role="status">
+              <LoaderCircle className="animate-spin text-teal-400" size={14} aria-hidden="true" />
+              Extracting and indexing document…
+            </p>
+          )}
+          {documentUploadError && (
+            <p className="text-xs text-rose-300" role="alert">{documentUploadError}</p>
+          )}
+        </div>
+      )}
 
       <div
         className="max-h-[min(58vh,640px)] min-h-48 space-y-5 overflow-y-auto p-4 sm:p-5"
@@ -69,6 +153,7 @@ function ConversationView({
                       summary={message.content}
                       sourceCount={message.sourceCount}
                       citations={message.citations}
+                      documentSources={message.documentSources}
                     />
                   ) : message.status === "streaming" ? (
                     <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-400" role="status">
@@ -123,7 +208,7 @@ function ConversationView({
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             placeholder="Ask a follow-up…"
-            disabled={isGenerating}
+            disabled={isGenerating || isUploadInProgress}
           />
           {isGenerating ? (
             <button
@@ -138,7 +223,7 @@ function ConversationView({
             <button
               className="inline-flex h-11 shrink-0 items-center gap-2 rounded-xl bg-teal-400 px-3.5 text-sm font-semibold text-slate-950 transition-colors hover:bg-teal-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
               type="submit"
-              disabled={!draft.trim()}
+              disabled={!draft.trim() || isUploadInProgress}
             >
               <Send size={15} aria-hidden="true" />
               <span className="hidden sm:inline">Send</span>

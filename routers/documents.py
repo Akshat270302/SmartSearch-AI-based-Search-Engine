@@ -1,17 +1,40 @@
+import asyncio
 from pathlib import PurePosixPath
 from uuid import uuid4
 
 import fitz
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field, field_validator
 
+from gemini_service import generate_document_answer
 from services.document_chunker import chunk_document
+from services.embedding_service import EmbeddingError, embed_chunks, embed_query
+from services.vector_store import (
+    DocumentCollectionNotFoundError,
+    InMemoryDocumentVectorStore,
+    VectorStoreError,
+)
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+document_vector_store = InMemoryDocumentVectorStore()
 
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 UPLOAD_READ_CHUNK_SIZE = 64 * 1024
 PDF_PAGE_SEPARATOR = "\n\f\n"
+
+
+class DocumentRetrievalRequest(BaseModel):
+    document_id: str = Field(min_length=1, max_length=200)
+    query: str = Field(min_length=1, max_length=4_000)
+    top_k: int = Field(default=5, ge=1, le=20, strict=True)
+
+    @field_validator("document_id", "query")
+    @classmethod
+    def reject_whitespace_only_values(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("This field must not be empty or whitespace-only.")
+        return value
 
 
 async def _read_upload_limited(upload: UploadFile) -> bytes:
@@ -126,6 +149,68 @@ async def extract_document(file: UploadFile = File(...)):
             page_texts=page_texts,
         )
 
+        if chunks:
+            try:
+                collection_exists = await asyncio.to_thread(
+                    document_vector_store.document_collection_exists,
+                    document_id,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not prepare document vector storage.",
+                ) from exc
+            if collection_exists:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A document collection already exists for this ID.",
+                )
+
+            try:
+                embedded_chunks = await asyncio.to_thread(
+                    embed_chunks,
+                    chunks,
+                )
+                if len(embedded_chunks) != len(chunks):
+                    raise EmbeddingError(
+                        "The embedding service returned an incomplete chunk set."
+                    )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Could not generate embeddings for the extracted document.",
+                ) from exc
+
+            try:
+                stored_ids = await asyncio.to_thread(
+                    document_vector_store.insert_chunks,
+                    document_id,
+                    embedded_chunks,
+                    filename=filename,
+                )
+                if len(stored_ids) != len(embedded_chunks):
+                    raise VectorStoreError(
+                        "The vector store accepted an incomplete chunk set."
+                    )
+            except Exception as exc:
+                try:
+                    await asyncio.to_thread(
+                        document_vector_store.delete_document_collection,
+                        document_id,
+                    )
+                except Exception:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            "Document indexing failed and temporary storage "
+                            "could not be cleaned up."
+                        ),
+                    ) from None
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not store the extracted document chunks.",
+                ) from exc
+
         return {
             "document_id": document_id,
             "filename": filename,
@@ -138,3 +223,97 @@ async def extract_document(file: UploadFile = File(...)):
         }
     finally:
         await file.close()
+
+
+def _retrieve_document_chunks(request: DocumentRetrievalRequest) -> list[dict]:
+    try:
+        collection_exists = document_vector_store.document_collection_exists(
+            request.document_id
+        )
+    except VectorStoreError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not access the document collection.",
+        ) from exc
+    if not collection_exists:
+        raise HTTPException(
+            status_code=404,
+            detail="The requested document collection was not found.",
+        )
+
+    try:
+        query_embedding = embed_query(request.query)
+    except EmbeddingError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Could not embed the retrieval query. Check Gemini availability and configuration.",
+        ) from exc
+
+    try:
+        results = document_vector_store.query_document(
+            request.document_id,
+            query_embedding,
+            top_k=request.top_k,
+        )
+    except DocumentCollectionNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="The requested document collection was not found.",
+        ) from exc
+    except VectorStoreError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not retrieve chunks from the document collection.",
+        ) from exc
+    return results
+
+
+@router.post("/retrieve")
+def retrieve_document_chunks(request: DocumentRetrievalRequest):
+    results = _retrieve_document_chunks(request)
+
+    return {
+        "document_id": request.document_id,
+        "query": request.query,
+        "results": results,
+    }
+
+
+@router.post("/ask")
+def ask_document(request: DocumentRetrievalRequest):
+    retrieved_chunks = _retrieve_document_chunks(request)
+    if not retrieved_chunks:
+        answer = (
+            "The document has no indexed passages, so the available document "
+            "context is insufficient to answer the question."
+        )
+    else:
+        try:
+            answer = generate_document_answer(request.query, retrieved_chunks)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Could not generate an answer from the document context.",
+            ) from exc
+        if not isinstance(answer, str) or not answer.strip():
+            raise HTTPException(
+                status_code=502,
+                detail="Could not generate an answer from the document context.",
+            )
+
+    source_fields = (
+        "filename",
+        "page_number",
+        "chunk_index",
+        "document_id",
+    )
+    sources = [
+        {key: chunk[key] for key in source_fields if key in chunk}
+        for chunk in retrieved_chunks
+    ]
+    return {
+        "document_id": request.document_id,
+        "query": request.query,
+        "answer": answer.strip(),
+        "sources": sources,
+    }

@@ -9,10 +9,16 @@ import LoadingState from "./components/LoadingState";
 import SearchBar from "./components/SearchBar";
 import SearchModeNav from "./components/SearchModeNav";
 import SearchResults from "./components/SearchResults";
-import { searchQuestion, streamQuestion } from "./services/api";
+import {
+  askDocument,
+  searchQuestion,
+  streamQuestion,
+  uploadDocument,
+} from "./services/api";
 
 const PRODUCT_NAME = "SearchAI";
 const MAX_CONVERSATION_MESSAGE_LENGTH = 4000;
+const MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024;
 const EXAMPLE_QUERIES = [
   "What is machine learning?",
   "Latest developments in space exploration",
@@ -69,9 +75,18 @@ function App() {
   const [session, setSession] = useState(null);
   const [conversation, setConversation] = useState(null);
   const [mode, setMode] = useState("all");
+  const [activeDocument, setActiveDocument] = useState(null);
+  const [documentUploadStatus, setDocumentUploadStatus] = useState("idle");
+  const [documentUploadError, setDocumentUploadError] = useState("");
   const sessionRef = useRef(null);
   const conversationRef = useRef(null);
-  const requestsRef = useRef({ web: null, images: null, ai: null, conversation: null });
+  const requestsRef = useRef({
+    web: null,
+    images: null,
+    ai: null,
+    conversation: null,
+    documentUpload: null,
+  });
   const answerRef = useRef(null);
 
   function commitSession(nextSession) {
@@ -107,7 +122,7 @@ function App() {
   }
 
   function cancelAllRequests() {
-    ["web", "images", "ai", "conversation"].forEach(cancelRequest);
+    ["web", "images", "ai", "conversation", "documentUpload"].forEach(cancelRequest);
   }
 
   useEffect(() => {
@@ -358,6 +373,70 @@ function App() {
     );
   }
 
+  async function handleDocumentUpload(file) {
+    if (!file || requestsRef.current.documentUpload) return;
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    if (extension !== "pdf" && extension !== "txt") {
+      setDocumentUploadStatus("error");
+      setDocumentUploadError("Choose a PDF or TXT file.");
+      return;
+    }
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      setDocumentUploadStatus("error");
+      setDocumentUploadError("The file exceeds the 10 MiB upload limit.");
+      return;
+    }
+
+    const request = {
+      controller: new AbortController(),
+      sessionId: currentSession.id,
+    };
+    requestsRef.current.documentUpload = request;
+    setDocumentUploadStatus("uploading");
+    setDocumentUploadError("");
+
+    try {
+      const payload = await uploadDocument(file, {
+        signal: request.controller.signal,
+      });
+      if (
+        requestsRef.current.documentUpload !== request ||
+        sessionRef.current?.id !== request.sessionId
+      ) return;
+      if (payload.chunks.length === 0) {
+        throw new Error("This document contains no text that can be indexed.");
+      }
+
+      setActiveDocument({
+        documentId: payload.document_id,
+        filename: file.name,
+      });
+      setDocumentUploadStatus("complete");
+    } catch (error) {
+      if (error.name === "AbortError" || request.controller.signal.aborted) return;
+      if (
+        requestsRef.current.documentUpload !== request ||
+        sessionRef.current?.id !== request.sessionId
+      ) return;
+      setDocumentUploadStatus("error");
+      setDocumentUploadError(getRequestError(error));
+    } finally {
+      if (requestsRef.current.documentUpload === request) {
+        requestsRef.current.documentUpload = null;
+      }
+    }
+  }
+
+  function handleDetachDocument() {
+    cancelRequest("documentUpload");
+    setActiveDocument(null);
+    setDocumentUploadStatus("idle");
+    setDocumentUploadError("");
+  }
+
   function generateConversationAnswer(userMessageId, assistantMessageId) {
     const activeSession = sessionRef.current;
     const activeConversation = conversationRef.current;
@@ -382,13 +461,21 @@ function App() {
       conversationId: activeConversation.id,
       userMessageId,
       assistantMessageId,
+      documentId: activeDocument?.documentId || null,
     };
 
     updateConversation(request.sessionId, request.conversationId, (value) => ({
       ...value,
       messages: value.messages.map((message) =>
         message.id === assistantMessageId
-          ? { ...message, content: "", citations: [], error: "", status: "streaming" }
+          ? {
+              ...message,
+              content: "",
+              citations: [],
+              documentSources: [],
+              error: "",
+              status: "streaming",
+            }
           : message,
       ),
     }));
@@ -396,6 +483,31 @@ function App() {
 
     request.promise = Promise.resolve()
       .then(async () => {
+        if (request.documentId) {
+          const payload = await askDocument({
+            documentId: request.documentId,
+            query: userMessage.content,
+            signal: request.controller.signal,
+          });
+          if (!isCurrentConversationRequest(request)) return;
+          updateConversation(request.sessionId, request.conversationId, (value) => ({
+            ...value,
+            messages: value.messages.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    content: payload.answer,
+                    citations: [],
+                    documentSources: payload.sources,
+                    error: "",
+                    status: "complete",
+                  }
+                : message,
+            ),
+          }));
+          return;
+        }
+
         const results = await loadWebResults(activeSession.query);
         if (!isCurrentConversationRequest(request)) return;
 
@@ -455,7 +567,14 @@ function App() {
           ...value,
           messages: value.messages.map((message) =>
             message.id === assistantMessageId
-              ? { ...message, content: "", citations: [], error: getRequestError(error), status: "error" }
+                ? {
+                    ...message,
+                    content: "",
+                    citations: [],
+                    documentSources: [],
+                    error: getRequestError(error),
+                    status: "error",
+                  }
               : message,
           ),
         }));
@@ -502,7 +621,14 @@ function App() {
       ...value,
       messages: value.messages.map((message) =>
         message.id === request.assistantMessageId
-          ? { ...message, content: "", citations: [], error: "", status: "cancelled" }
+          ? {
+              ...message,
+              content: "",
+              citations: [],
+              documentSources: [],
+              error: "",
+              status: "cancelled",
+            }
           : message,
       ),
     }));
@@ -510,6 +636,9 @@ function App() {
 
   function startNewSearch(queryKey) {
     cancelAllRequests();
+    setActiveDocument(null);
+    setDocumentUploadStatus("idle");
+    setDocumentUploadError("");
     const nextSession = createSession(queryKey);
     commitSession(nextSession);
     commitConversation(createConversation(nextSession.id));
@@ -687,6 +816,12 @@ function App() {
               messages={activeConversation.messages}
               isGenerating={isConversationGenerating}
               isInitialLoading={session.ai.status === "loading" && activeConversation.messages.length === 0}
+              isUploadInProgress={documentUploadStatus === "uploading"}
+              activeDocument={activeDocument}
+              documentUploadStatus={documentUploadStatus}
+              documentUploadError={documentUploadError}
+              onUploadDocument={handleDocumentUpload}
+              onDetachDocument={handleDetachDocument}
               onSend={handleConversationSend}
               onCancel={requestsRef.current.conversation ? handleCancelConversation : handleCancel}
               onRetry={handleRetryConversation}

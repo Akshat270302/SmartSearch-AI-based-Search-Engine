@@ -18,6 +18,98 @@ function getErrorMessage(status, detail) {
   return `The search request could not be completed (HTTP ${status}).`;
 }
 
+function getDocumentErrorMessage(status, detail) {
+  if (typeof detail === "string" && detail.trim()) {
+    return detail;
+  }
+  if (status >= 500) {
+    return "The document service encountered a problem. Please try again shortly.";
+  }
+  return `The document request could not be completed (HTTP ${status}).`;
+}
+
+async function getDocumentResponsePayload(response) {
+  let payload;
+  try {
+    payload = await response.json();
+  } catch {
+    if (!response.ok) {
+      throw new Error(getDocumentErrorMessage(response.status));
+    }
+    throw new Error("The document service returned an invalid response.");
+  }
+
+  if (!response.ok) {
+    throw new Error(getDocumentErrorMessage(response.status, payload?.detail));
+  }
+  return payload;
+}
+
+export async function uploadDocument(file, { signal } = {}) {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/documents/extract`, {
+      method: "POST",
+      body: formData,
+      signal,
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    throw new Error(
+      "Unable to reach the document service. Check that the backend is running.",
+    );
+  }
+
+  const payload = await getDocumentResponsePayload(response);
+  if (
+    !payload ||
+    typeof payload.document_id !== "string" ||
+    !payload.document_id.trim() ||
+    typeof payload.filename !== "string" ||
+    !Array.isArray(payload.chunks)
+  ) {
+    throw new Error("The document service returned an unexpected response.");
+  }
+  return payload;
+}
+
+export async function askDocument({ documentId, query, topK, signal }) {
+  const body = { document_id: documentId, query };
+  if (topK !== undefined) body.top_k = topK;
+
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/documents/ask`, {
+      method: "POST",
+      signal,
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (error) {
+    if (error.name === "AbortError") throw error;
+    throw new Error(
+      "Unable to reach the document service. Check that the backend is running.",
+    );
+  }
+
+  const payload = await getDocumentResponsePayload(response);
+  if (
+    !payload ||
+    typeof payload.answer !== "string" ||
+    !payload.answer.trim() ||
+    !Array.isArray(payload.sources)
+  ) {
+    throw new Error("The document service returned an unexpected response.");
+  }
+  return payload;
+}
+
 export async function askQuestion(query, { signal } = {}) {
   const params = new URLSearchParams({ q: query });
   const url = `${API_BASE_URL}/ask?${params.toString()}`;

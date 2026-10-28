@@ -197,7 +197,48 @@ function CitedSources({ sources }) {
   );
 }
 
-function AIAnswer({ summary, sourceCount, citations = [] }) {
+function DocumentSources({ sources }) {
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+
+  return (
+    <div className="mt-7 border-t border-slate-800 pt-5">
+      <h3 className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-500">
+        Sources
+      </h3>
+      <ul className="mt-3 grid gap-2 sm:grid-cols-2">
+        {sources.map((source, index) => {
+          const filename =
+            typeof source?.filename === "string" && source.filename.trim()
+              ? source.filename.trim()
+              : "Uploaded document";
+          const key = [source?.document_id, source?.chunk_index, source?.page_number, index].join(":");
+
+          return (
+            <li
+              className="min-w-0 rounded-xl border border-slate-800 bg-slate-950/50 p-3"
+              key={key}
+            >
+              <p className="break-words text-sm font-medium text-slate-200">{filename}</p>
+              <p className="mt-1 text-xs text-slate-500">
+                {typeof source?.page_number === "number" &&
+                  `Page ${source.page_number}`}
+                {typeof source?.page_number === "number" &&
+                  typeof source?.chunk_index === "number" && " · "}
+                {typeof source?.chunk_index === "number" &&
+                  `Chunk ${source.chunk_index}`}
+                {typeof source?.page_number !== "number" &&
+                  typeof source?.chunk_index !== "number" &&
+                  "Document passage"}
+              </p>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+function AIAnswer({ summary, sourceCount, citations = [], documentSources = [] }) {
   const headingId = useId();
   const hasSummary = typeof summary === "string" && summary.trim().length > 0;
   const sourceMap = new Map();
@@ -250,6 +291,7 @@ function AIAnswer({ summary, sourceCount, citations = [] }) {
         </p>
       )}
       <CitedSources sources={citationSources} />
+      <DocumentSources sources={documentSources} />
     </section>
   );
 }

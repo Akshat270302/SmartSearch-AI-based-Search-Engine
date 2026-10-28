@@ -2,6 +2,7 @@ import os
 import sys
 import unittest
 from uuid import UUID
+from unittest.mock import patch
 
 import fitz
 from fastapi.testclient import TestClient
@@ -32,11 +33,33 @@ def make_pdf(*page_texts):
 
 
 class DocumentExtractionTests(unittest.TestCase):
+    def setUp(self):
+        self.created_document_ids = []
+
+    def tearDown(self):
+        from routers import documents
+
+        for document_id in self.created_document_ids:
+            documents.document_vector_store.delete_document_collection(document_id)
+
     def upload(self, filename, content, content_type="application/octet-stream"):
-        return client.post(
-            "/documents/extract",
-            files={"file": (filename, content, content_type)},
-        )
+        def mock_embeddings(chunks):
+            return [
+                {
+                    "chunk": chunk,
+                    "embedding": [float(chunk["chunk_index"] + 1), 0.0],
+                }
+                for chunk in chunks
+            ]
+
+        with patch("routers.documents.embed_chunks", side_effect=mock_embeddings):
+            response = client.post(
+                "/documents/extract",
+                files={"file": (filename, content, content_type)},
+            )
+        if response.status_code == 200:
+            self.created_document_ids.append(response.json()["document_id"])
+        return response
 
     def assert_chunk_coverage(self, source, chunks):
         self.assertTrue(chunks)

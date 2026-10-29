@@ -4,7 +4,7 @@ An AI-powered search application that combines web search, source-backed
 AI answers, image search, conversational follow-up questions, and
 Retrieval-Augmented Generation (RAG) for uploaded documents.
 
-**Live application:** https://search.akshat04.live\
+**Live application:** https://search.akshat04.live
 **API:** https://api.akshat04.live
 
 ## Overview
